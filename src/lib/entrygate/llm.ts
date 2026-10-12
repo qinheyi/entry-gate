@@ -19,6 +19,17 @@ export function llmEnabled(): boolean {
   return Boolean(process.env.MINIMAX_API_KEY);
 }
 
+/** Normalize accidental env values like "minimax_model=MiniMax-M3" or quoted strings. */
+export function resolveModelName(): string {
+  let raw = (process.env.MINIMAX_MODEL || "MiniMax-M3").trim().replace(/^["']|["']$/g, "");
+  const eq = raw.match(/^(?:minimax[_-]?model|model)\s*=\s*(.+)$/i);
+  if (eq) raw = eq[1].trim().replace(/^["']|["']$/g, "");
+  // Common mis-keys → canonical MiniMax-M3
+  if (/^minimax[-_]?m3$/i.test(raw) || raw.toLowerCase() === "m3") return "MiniMax-M3";
+  if (!raw) return "MiniMax-M3";
+  return raw;
+}
+
 function stripThinking(text: string | null | undefined): string {
   if (!text) return "";
   let t = text.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, "");
@@ -38,7 +49,7 @@ export async function chatCompletion(opts: {
   const key = process.env.MINIMAX_API_KEY;
   if (!key) throw new Error("MINIMAX_API_KEY not set");
   const baseUrl = (process.env.MINIMAX_BASE_URL || "https://api.minimax.cn/v1").replace(/\/+$/, "");
-  const model = process.env.MINIMAX_MODEL || "MiniMax-M3";
+  const model = resolveModelName();
 
   const body: Record<string, unknown> = {
     model,
@@ -63,7 +74,7 @@ export async function chatCompletion(opts: {
       cache: "no-store",
     });
     const raw = await res.text();
-    if (!res.ok) throw new Error(`MiniMax HTTP ${res.status}: ${raw.slice(0, 300)}`);
+    if (!res.ok) throw new Error(`MiniMax HTTP ${res.status} (model=${model}): ${raw.slice(0, 300)}`);
     const data = JSON.parse(raw);
     const br = data.base_resp;
     if (br && typeof br.status_code === "number" && br.status_code !== 0) {

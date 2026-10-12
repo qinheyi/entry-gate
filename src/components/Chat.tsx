@@ -37,8 +37,27 @@ interface Msg {
   audit?: AuditResult;
 }
 
+const STORAGE_KEY = "entry-gate-session-v1";
+
 const WELCOME =
-  "Hi — I'm Entry Gate, your submission steward. Paste a live demo URL and GitHub repo (optional video), then ask \"Am I ready to submit?\" I'll probe the links and give you a go / almost / no-go.";
+  "Hi — I'm Entry Gate, your Alexa+-style submission steward. Paste a live demo URL and GitHub repo (optional video), then ask \"Am I ready to submit?\" I'll probe the links and give you a go / almost / no-go — with ranked fixes and a spoken summary.";
+
+const EXAMPLES = [
+  {
+    label: "Try Encore",
+    demoUrl: "https://encore-rouge-chi.vercel.app",
+    repoUrl: "qinheyi/encore",
+    videoUrl: "",
+    message: "Am I ready to submit?",
+  },
+  {
+    label: "Audit Entry Gate",
+    demoUrl: "https://entry-gate.vercel.app",
+    repoUrl: "qinheyi/entry-gate",
+    videoUrl: "",
+    message: "Am I ready to submit?",
+  },
+];
 
 function verdictColor(v: Verdict) {
   if (v === "go") return "text-go border-go/40 bg-go/10";
@@ -53,33 +72,77 @@ function statusDot(s: ChecklistItem["status"]) {
   return "bg-muted";
 }
 
+function speak(text: string) {
+  if (typeof window === "undefined" || !window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.rate = 1.02;
+  u.pitch = 1;
+  window.speechSynthesis.speak(u);
+}
+
 export default function Chat() {
   const [demoUrl, setDemoUrl] = useState("");
   const [repoUrl, setRepoUrl] = useState("");
   const [videoUrl, setVideoUrl] = useState("");
   const [input, setInput] = useState("Am I ready to submit?");
   const [busy, setBusy] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
   const [msgs, setMsgs] = useState<Msg[]>([
     { id: "welcome", role: "assistant", text: WELCOME },
   ]);
   const bottomRef = useRef<HTMLDivElement>(null);
 
+  // Restore last session (Alexa+ multi-turn state)
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as {
+          demoUrl?: string;
+          repoUrl?: string;
+          videoUrl?: string;
+        };
+        if (parsed.demoUrl) setDemoUrl(parsed.demoUrl);
+        if (parsed.repoUrl) setRepoUrl(parsed.repoUrl);
+        if (parsed.videoUrl) setVideoUrl(parsed.videoUrl);
+      }
+    } catch {
+      /* ignore */
+    }
+    setHydrated(true);
+  }, []);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    try {
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ demoUrl, repoUrl, videoUrl }),
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [demoUrl, repoUrl, videoUrl, hydrated]);
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [msgs, busy]);
 
-  async function send() {
-    const message = input.trim();
-    if (!message || busy) return;
+  async function runAudit(message: string, urls?: { demoUrl?: string; repoUrl?: string; videoUrl?: string }) {
+    const d = urls?.demoUrl ?? demoUrl;
+    const r = urls?.repoUrl ?? repoUrl;
+    const v = urls?.videoUrl ?? videoUrl;
+    if (!message.trim() || busy) return;
     setBusy(true);
     const userMsg: Msg = {
       id: `u-${Date.now()}`,
       role: "user",
       text: [
         message,
-        demoUrl && `Demo: ${demoUrl}`,
-        repoUrl && `Repo: ${repoUrl}`,
-        videoUrl && `Video: ${videoUrl}`,
+        d && `Demo: ${d}`,
+        r && `Repo: ${r}`,
+        v && `Video: ${v}`,
       ]
         .filter(Boolean)
         .join("\n"),
@@ -93,9 +156,9 @@ export default function Chat() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           message,
-          demoUrl: demoUrl || undefined,
-          repoUrl: repoUrl || undefined,
-          videoUrl: videoUrl || undefined,
+          demoUrl: d || undefined,
+          repoUrl: r || undefined,
+          videoUrl: v || undefined,
         }),
       });
       const data = await res.json();
@@ -134,17 +197,46 @@ export default function Chat() {
     }
   }
 
+  function applyExample(ex: (typeof EXAMPLES)[number], autoRun: boolean) {
+    setDemoUrl(ex.demoUrl);
+    setRepoUrl(ex.repoUrl);
+    setVideoUrl(ex.videoUrl);
+    setInput(ex.message);
+    if (autoRun) {
+      void runAudit(ex.message, {
+        demoUrl: ex.demoUrl,
+        repoUrl: ex.repoUrl,
+        videoUrl: ex.videoUrl,
+      });
+    }
+  }
+
+  const lastAudit = [...msgs].reverse().find((m) => m.audit)?.audit;
+
   return (
     <div className="mx-auto flex min-h-screen max-w-3xl flex-col px-4 py-8">
       <header className="mb-6">
-        <p className="text-xs uppercase tracking-[0.2em] text-accent">Alexa+ simulation</p>
+        <div className="flex items-center gap-2">
+          <span className="relative flex h-2.5 w-2.5">
+            <span
+              className={`absolute inline-flex h-full w-full rounded-full bg-accent opacity-75 ${
+                busy ? "animate-ping" : ""
+              }`}
+            />
+            <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-accent" />
+          </span>
+          <p className="text-xs uppercase tracking-[0.2em] text-accent">
+            Alexa+ simulation · {busy ? "listening…" : "ready"}
+          </p>
+        </div>
         <h1 className="mt-1 text-3xl font-semibold tracking-tight">Entry Gate</h1>
         <p className="mt-2 text-sm text-muted">
           Submission steward agent — verifies demo, repo, and video before you hit Submit.
+          Session URLs persist in this browser.
         </p>
       </header>
 
-      <section className="mb-4 grid gap-3 rounded-2xl border border-border bg-card/80 p-4 sm:grid-cols-3">
+      <section className="mb-3 grid gap-3 rounded-2xl border border-border bg-card/80 p-4 sm:grid-cols-3">
         <label className="flex flex-col gap-1 text-xs text-muted">
           Demo URL
           <input
@@ -174,6 +266,33 @@ export default function Chat() {
         </label>
       </section>
 
+      <div className="mb-4 flex flex-wrap gap-2">
+        {EXAMPLES.map((ex) => (
+          <button
+            key={ex.label}
+            type="button"
+            disabled={busy}
+            onClick={() => applyExample(ex, true)}
+            className="rounded-full border border-border bg-card px-3 py-1.5 text-xs text-muted transition hover:border-accent hover:text-foreground disabled:opacity-40"
+          >
+            {ex.label}
+          </button>
+        ))}
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => {
+            setDemoUrl("");
+            setRepoUrl("");
+            setVideoUrl("");
+            setMsgs([{ id: "welcome", role: "assistant", text: WELCOME }]);
+          }}
+          className="rounded-full border border-border bg-transparent px-3 py-1.5 text-xs text-muted transition hover:border-accent hover:text-foreground disabled:opacity-40"
+        >
+          Clear session
+        </button>
+      </div>
+
       <div className="flex flex-1 flex-col gap-3 overflow-y-auto rounded-2xl border border-border bg-card/40 p-4">
         {msgs.map((m) => (
           <div
@@ -187,13 +306,23 @@ export default function Chat() {
             <p className="whitespace-pre-wrap">{m.text}</p>
             {m.audit && (
               <div className="mt-3 space-y-3 border-t border-border pt-3">
-                <div
-                  className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide ${verdictColor(
-                    m.audit.verdict,
-                  )}`}
-                >
-                  {m.audit.verdict} · {m.audit.score}/100
-                  {m.audit.llmUsed ? " · LLM" : " · rules"}
+                <div className="flex flex-wrap items-center gap-2">
+                  <div
+                    className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide ${verdictColor(
+                      m.audit.verdict,
+                    )}`}
+                  >
+                    {m.audit.verdict} · {m.audit.score}/100
+                    {m.audit.llmUsed ? " · LLM" : " · rules"}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => speak(m.audit!.summary)}
+                    className="rounded-full border border-border px-2.5 py-1 text-xs text-muted hover:border-accent hover:text-foreground"
+                    title="Speak summary (browser TTS)"
+                  >
+                    Speak
+                  </button>
                 </div>
                 <ul className="space-y-1.5">
                   {m.audit.checklist.map((c) => (
@@ -233,18 +362,48 @@ export default function Chat() {
           </div>
         ))}
         {busy && (
-          <div className="mr-auto rounded-2xl border border-border bg-card px-4 py-3 text-sm text-muted">
+          <div className="mr-auto flex items-center gap-2 rounded-2xl border border-border bg-card px-4 py-3 text-sm text-muted">
+            <span className="relative flex h-2 w-2">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent opacity-75" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-accent" />
+            </span>
             Checking links…
           </div>
         )}
         <div ref={bottomRef} />
       </div>
 
+      {lastAudit && lastAudit.fixes.length > 0 && !busy && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          <span className="self-center text-xs text-muted">Follow-up:</span>
+          <button
+            type="button"
+            className="rounded-full border border-border px-3 py-1 text-xs text-muted hover:border-accent hover:text-foreground"
+            onClick={() => {
+              setInput("What should I fix first?");
+              void runAudit("What should I fix first?");
+            }}
+          >
+            What should I fix first?
+          </button>
+          <button
+            type="button"
+            className="rounded-full border border-border px-3 py-1 text-xs text-muted hover:border-accent hover:text-foreground"
+            onClick={() => {
+              setInput("Re-audit after my fixes");
+              void runAudit("Re-audit after my fixes");
+            }}
+          >
+            Re-audit
+          </button>
+        </div>
+      )}
+
       <form
         className="mt-4 flex gap-2"
         onSubmit={(e) => {
           e.preventDefault();
-          void send();
+          void runAudit(input.trim());
         }}
       >
         <input

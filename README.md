@@ -1,18 +1,20 @@
 # Entry Gate
 
-Simulated **Alexa+** submission-steward agent for the [Amazon Developer Hackathon](https://amazonappdev2026.devpost.com/) (Alexa+ track).
+Simulated **Alexa+** submission-steward agent for the [Amazon Developer Hackathon](https://amazonappdev2026.devpost.com/) (Alexa+ track — simulated experience path).
 
-Paste a live demo URL, GitHub repo, and optional YouTube/Vimeo link, then ask **“Am I ready to submit?”** Entry Gate runs verification tools and returns a **go / almost / no-go** with ranked fixes — in a dark chat UI that mimics an Alexa+ conversation.
+Paste a live demo URL, GitHub repo, and optional YouTube/Vimeo link, then ask **“Am I ready to submit?”** Entry Gate runs verification tools and returns a **go / almost / no-go** with ranked fixes — in a dark chat UI that mimics an Alexa+ conversation (session memory, spoken summary, follow-ups).
+
+**Live demo:** https://entry-gate.vercel.app  
 
 Built by **Qin HEYI** &lt;qinheyi@agentmail.to&gt;. MIT licensed.
 
 ## What it does
 
-1. **fetch_page** — GET the demo URL; report HTTP status + HTML title.
-2. **check_repo** — Resolve `owner/repo` via `gh api` (if logged in) or the public GitHub HTTP API: public?, license, README, `pushed_at`.
+1. **fetch_page** — GET the demo URL; report HTTP status + HTML title; flag soft failures (auth wall, thin page).
+2. **check_repo** — Resolve `owner/repo` via `gh api` (if logged in) or the public GitHub HTTP API: public?, license, README size/setup hints, description, `pushed_at`.
 3. **check_video_meta** — YouTube/Vimeo oEmbed (title; duration when the provider returns it). Flag &gt;3 minutes when known.
-4. **score_checklist** — Deterministic rubric → verdict + ranked fixes.
-5. Optional **MiniMax** narration for a spoken-style summary (falls back to rules if the key is missing or the call fails).
+4. **score_checklist** — Deterministic rubric → verdict + ranked fixes; surfaces Amazon product-feedback / friction-log reminders.
+5. Optional **MiniMax** narration for a spoken-style summary (falls back to rules if the key is missing or the call fails). Browser **Speak** uses Web Speech API.
 
 ## Stack
 
@@ -23,7 +25,6 @@ Built by **Qin HEYI** &lt;qinheyi@agentmail.to&gt;. MIT licensed.
 ## Setup
 
 ```bash
-cd app
 cp .env.example .env.local   # optional: add MINIMAX_API_KEY
 npm install
 npm run dev
@@ -37,7 +38,7 @@ Open [http://localhost:3000](http://localhost:3000).
 |---|---|---|
 | `MINIMAX_API_KEY` | No | If set, enables short LLM narration after scoring |
 | `MINIMAX_BASE_URL` | No | Default `https://api.minimax.cn/v1` |
-| `MINIMAX_MODEL` | No | Default `MiniMax-M3` |
+| `MINIMAX_MODEL` | No | Default `MiniMax-M3` (accidental `minimax_model=…` values are sanitized) |
 | `MINIMAX_THINKING` | No | Set `adaptive` to allow thinking; default disabled on M3 |
 | `ENTRY_GATE_LLM` | No | Set `0` to force deterministic mode even with a key |
 | `LLM_TIMEOUT_MS` | No | Default `60000` |
@@ -56,6 +57,11 @@ Without a key, Entry Gate still returns a full structured audit.
   "videoUrl": "https://www.youtube.com/watch?v=..."
 }
 ```
+
+## Submission docs
+
+- [`SUBMISSION_DRAFT_EN.md`](./SUBMISSION_DRAFT_EN.md) — English Devpost field draft + product feedback / friction log
+- [`DEMO_VIDEO_SCRIPT.md`](./DEMO_VIDEO_SCRIPT.md) — &lt;3 min screen-record outline for YouTube/Vimeo
 
 ## Scripts
 

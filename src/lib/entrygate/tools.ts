@@ -35,20 +35,48 @@ export async function fetchPage(url: string): Promise<ToolTrace> {
     const finalUrl = res.url || url;
     const ctype = res.headers.get("content-type") || "";
     let title = "";
+    let bodyLen = 0;
+    let softFail: string | null = null;
+    let hasViewport = false;
+    let metaDescription = "";
     if (ctype.includes("text/html") || ctype.includes("application/xhtml")) {
       const text = await res.text();
+      bodyLen = text.length;
       const m = text.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
       title = m ? truncate(m[1].replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">"), 120) : "";
+      const md = text.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i)
+        || text.match(/<meta[^>]+content=["']([^"']+)["'][^>]+name=["']description["']/i);
+      metaDescription = md ? truncate(md[1], 160) : "";
+      hasViewport = /name=["']viewport["']/i.test(text);
+      if (/authentication required|vercel authentication|login to continue/i.test(text)) {
+        softFail = "Looks like a Vercel/auth wall — judges may not open the demo.";
+      } else if (/deployment not found|404: not found|this deployment could not be found/i.test(text)) {
+        softFail = "Page looks like a deployment 404.";
+      } else if (!title && bodyLen < 400) {
+        softFail = "Very thin HTML with no <title> — demo may be empty.";
+      }
     }
-    const ok = res.status >= 200 && res.status < 400;
+    const statusOk = res.status >= 200 && res.status < 400;
+    const ok = statusOk && !softFail;
     return {
       name: "fetch_page",
       args,
       ok,
-      summary: ok
-        ? `HTTP ${res.status}${title ? ` — "${title}"` : ""} (${finalUrl})`
-        : `HTTP ${res.status} for ${finalUrl}`,
-      raw: { status: res.status, finalUrl, title, contentType: ctype },
+      summary: softFail
+        ? `HTTP ${res.status}${title ? ` — "${title}"` : ""} — ${softFail}`
+        : statusOk
+          ? `HTTP ${res.status}${title ? ` — "${title}"` : ""} (${finalUrl})`
+          : `HTTP ${res.status} for ${finalUrl}`,
+      raw: {
+        status: res.status,
+        finalUrl,
+        title,
+        contentType: ctype,
+        bodyLen,
+        softFail,
+        hasViewport,
+        metaDescription,
+      },
     };
   } catch (e) {
     return {
@@ -149,13 +177,33 @@ export async function checkRepo(repoInput: string): Promise<ToolTrace> {
   const pushed_at = typeof data.pushed_at === "string" ? data.pushed_at : null;
   const defaultBranch = typeof data.default_branch === "string" ? data.default_branch : "main";
 
-  // README presence
+  // README presence + light quality signals
   let hasReadme = false;
+  let readmeBytes = 0;
+  const readmeHints: string[] = [];
   const readmePath = `/repos/${owner}/${repo}/readme`;
   const readme =
     (await ghApiJson(readmePath)) ||
     (await publicGithubJson(readmePath));
-  if (readme && typeof readme === "object") hasReadme = true;
+  if (readme && typeof readme === "object") {
+    hasReadme = true;
+    const r = readme as { size?: number; content?: string; encoding?: string };
+    if (typeof r.size === "number") readmeBytes = r.size;
+    if (r.encoding === "base64" && typeof r.content === "string") {
+      try {
+        const decoded = Buffer.from(r.content.replace(/\s/g, ""), "base64").toString("utf8");
+        readmeBytes = readmeBytes || decoded.length;
+        const lower = decoded.toLowerCase();
+        if (/npm (i|install)|pnpm i|yarn|bun install/.test(lower)) readmeHints.push("install");
+        if (/\.env|environment variable|api[_ ]?key/.test(lower)) readmeHints.push("env");
+        if (/license|mit|apache/.test(lower)) readmeHints.push("license-mention");
+        if (/demo|deploy|vercel|live/.test(lower)) readmeHints.push("demo");
+        if (/how (it )?works|what it does|overview|features/.test(lower)) readmeHints.push("overview");
+      } catch {
+        /* ignore decode errors */
+      }
+    }
+  }
   // Also try contents listing as soft check
   if (!hasReadme) {
     const contents =
@@ -169,6 +217,15 @@ export async function checkRepo(repoInput: string): Promise<ToolTrace> {
     }
   }
 
+  const description =
+    typeof data.description === "string" && data.description.trim()
+      ? String(data.description).trim()
+      : null;
+  const homepage =
+    typeof data.homepage === "string" && data.homepage.trim()
+      ? String(data.homepage).trim()
+      : null;
+
   const ok = !isPrivate;
   return {
     name: "check_repo",
@@ -177,7 +234,10 @@ export async function checkRepo(repoInput: string): Promise<ToolTrace> {
     summary: [
       isPrivate ? "private" : "public",
       license ? `license=${license}` : "no license",
-      hasReadme ? "README present" : "no README",
+      hasReadme
+        ? `README present${readmeBytes ? ` (~${readmeBytes}B)` : ""}`
+        : "no README",
+      description ? "has description" : "no description",
       pushed_at ? `pushed_at=${pushed_at}` : "no push date",
       `via ${source}`,
     ].join("; "),
@@ -187,10 +247,13 @@ export async function checkRepo(repoInput: string): Promise<ToolTrace> {
       private: isPrivate,
       license,
       hasReadme,
+      readmeBytes,
+      readmeHints,
       pushed_at,
       defaultBranch,
       html_url: data.html_url,
-      description: data.description,
+      description,
+      homepage,
       source,
     },
   };
@@ -326,16 +389,37 @@ export function scoreChecklist(input: {
     });
     fixes.push("Paste a public live demo URL (Vercel/other) that judges can open.");
   } else {
-    const status = (input.demo.raw as { status?: number } | undefined)?.status;
-    const ok = input.demo.ok && typeof status === "number" && status >= 200 && status < 400;
+    const rawDemo = (input.demo.raw || {}) as {
+      status?: number;
+      softFail?: string | null;
+      title?: string;
+      hasViewport?: boolean;
+      metaDescription?: string;
+      bodyLen?: number;
+    };
+    const status = rawDemo.status;
+    const httpOk = typeof status === "number" && status >= 200 && status < 400;
+    const softFail = rawDemo.softFail || null;
+    const ok = input.demo.ok && httpOk && !softFail;
     items.push({
       id: "demo",
       label: "Live demo URL reachable",
-      status: ok ? "pass" : "fail",
+      status: ok ? "pass" : softFail && httpOk ? "warn" : "fail",
       detail: input.demo.summary,
-      priority: 1,
+      priority: softFail && httpOk ? 2 : 1,
     });
-    if (!ok) fixes.push("Fix or publish the demo URL so it returns HTTP 2xx/3xx.");
+    if (!httpOk) fixes.push("Fix or publish the demo URL so it returns HTTP 2xx/3xx.");
+    else if (softFail) fixes.push(softFail);
+    else if (!rawDemo.title) {
+      items.push({
+        id: "demo_title",
+        label: "Demo page has a title",
+        status: "warn",
+        detail: "No <title> found — judges may see a blank tab name",
+        priority: 3,
+      });
+      fixes.push("Add a clear HTML <title> on the demo so it looks finished in a browser tab.");
+    }
   }
 
   // Repo
@@ -354,6 +438,10 @@ export function scoreChecklist(input: {
       public?: boolean | null;
       license?: string | null;
       hasReadme?: boolean | null;
+      readmeBytes?: number | null;
+      readmeHints?: string[] | null;
+      description?: string | null;
+      homepage?: string | null;
       pushed_at?: string | null;
     };
     if (raw.mock) {
@@ -389,10 +477,42 @@ export function scoreChecklist(input: {
         id: "repo_readme",
         label: "README present",
         status: raw.hasReadme ? "pass" : "fail",
-        detail: raw.hasReadme ? "README found" : "No README detected",
+        detail: raw.hasReadme
+          ? `README found${raw.readmeBytes ? ` (~${raw.readmeBytes} bytes)` : ""}`
+          : "No README detected",
         priority: 1,
       });
-      if (!raw.hasReadme) fixes.push("Add a README with setup, env vars, and what the project does.");
+      if (!raw.hasReadme) {
+        fixes.push("Add a README with setup, env vars, and what the project does.");
+      } else {
+        const hints = raw.readmeHints || [];
+        const thin = (raw.readmeBytes || 0) > 0 && (raw.readmeBytes || 0) < 400;
+        const missingSetup = !hints.includes("install") && !hints.includes("env");
+        if (thin || missingSetup) {
+          items.push({
+            id: "repo_readme_quality",
+            label: "README setup quality",
+            status: "warn",
+            detail: thin
+              ? "README is very short — add run instructions"
+              : `README hints: ${hints.join(", ") || "none"} — consider install/env sections`,
+            priority: 3,
+          });
+          if (thin) fixes.push("Expand the README past a stub: what it does, how to run, env vars.");
+          else if (missingSetup)
+            fixes.push("Document install/run steps and required env vars in the README.");
+        }
+      }
+
+      items.push({
+        id: "repo_description",
+        label: "GitHub description",
+        status: raw.description ? "pass" : "warn",
+        detail: raw.description ? truncate(raw.description, 100) : "Empty repo description",
+        priority: 4,
+      });
+      if (!raw.description)
+        fixes.push("Set a one-line GitHub repository description for judges scanning the repo.");
 
       if (raw.pushed_at) {
         const ageDays = (Date.now() - new Date(raw.pushed_at).getTime()) / 86_400_000;
@@ -465,6 +585,37 @@ export function scoreChecklist(input: {
       detail: "User requested a submit-readiness audit",
       priority: 5,
     });
+  }
+
+  // Amazon / Devpost pack reminders — informational (skip) so they don't block a "go"
+  items.push({
+    id: "pack_feedback",
+    label: "Product feedback (required on Devpost)",
+    status: "skip",
+    detail:
+      "Remember to paste product feedback on every tool/SDK you used (what worked, what needs work, onboarding).",
+    priority: 4,
+  });
+  items.push({
+    id: "pack_friction",
+    label: "Friction log (optional +10%)",
+    status: "skip",
+    detail:
+      "Optional friction-log entries can earn up to a 10% judging bonus — task, expected vs actual, severity, suggestion.",
+    priority: 5,
+  });
+  // Surface as soft tips only when the builder is close (demo+repo present, no hard fails yet)
+  const closeToSubmit =
+    Boolean(input.demo?.ok) &&
+    Boolean(input.repo?.ok) &&
+    !items.some((i) => i.status === "fail" && i.priority <= 1);
+  if (closeToSubmit) {
+    fixes.push(
+      "Before Devpost submit: draft product feedback for the tools you used (e.g. MiniMax, Vercel, GitHub API).",
+    );
+    fixes.push(
+      "Optional: add 1–2 friction-log entries (e.g. YouTube oEmbed omits duration) for the +10% path.",
+    );
   }
 
   // Score
